@@ -1,0 +1,32 @@
+From 782659fd3d7c8ec7e3848ed86c10900b2a4c8e1e Mon Sep 17 00:00:00 2001
+From: Damian Hobson-Garcia <dhobsong@igel.co.jp>
+Date: Wed, 7 Oct 2015 17:12:58 +0900
+Subject: [PATCH] Allow GPU-GPU video texture copy when target is EXTERNAL_OES
+
+---
+ src/media/blink/webmediaplayer_impl.cc | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff /media/blink/webmediaplayer_impl.cc /media/blink/webmediaplayer_impl.cc
+index d5a411f..f5eed54 100644
+--- /media/blink/webmediaplayer_impl.cc
++++ /media/blink/webmediaplayer_impl.cc
+@@ -608,12 +608,13 @@ bool WebMediaPlayerImpl::copyVideoTextureToPlatformTexture(
+     return false;
+
+   const gpu::MailboxHolder* mailbox_holder = video_frame->mailbox_holder();
+-  if (mailbox_holder->texture_target != GL_TEXTURE_2D)
++  if ((mailbox_holder->texture_target != GL_TEXTURE_2D) &&
++      (mailbox_holder->texture_target != GL_TEXTURE_EXTERNAL_OES))
+     return false;
+
+   web_graphics_context->waitSyncPoint(mailbox_holder->sync_point);
+   uint32 source_texture = web_graphics_context->createAndConsumeTextureCHROMIUM(
+-      GL_TEXTURE_2D, mailbox_holder->mailbox.name);
++      mailbox_holder->texture_target, mailbox_holder->mailbox.name);
+
+   // The video is stored in a unmultiplied format, so premultiply
+   // if necessary.
+--
+1.9.1
+

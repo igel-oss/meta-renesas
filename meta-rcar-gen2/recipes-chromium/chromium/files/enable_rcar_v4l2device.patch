@@ -1,0 +1,321 @@
+Add RCar V4L2 device to Chromium code.
+--- /content/common/gpu/media/v4l2_video_device.cc	2015-08-26 15:23:37.712930201 +0900
++++ /content/common/gpu/media/v4l2_video_device.cc	2015-08-21 14:21:13.000000000 +0900
+@@ -5,6 +5,7 @@
+ #include <linux/videodev2.h>
+
+ #include "base/numerics/safe_conversions.h"
++#include "content/common/gpu/media/rcar_v4l2_video_device.h"
+ #include "content/common/gpu/media/exynos_v4l2_video_device.h"
+ #include "content/common/gpu/media/tegra_v4l2_video_device.h"
+
+@@ -16,6 +17,10 @@
+ scoped_ptr<V4L2Device> V4L2Device::Create(Type type) {
+   DVLOG(3) << __PRETTY_FUNCTION__;
+
++  scoped_ptr<RCarV4L2Device> rcar_device(new RCarV4L2Device(type));
++  if (rcar_device->Initialize())
++    return rcar_device.Pass();
++
+   scoped_ptr<ExynosV4L2Device> exynos_device(new ExynosV4L2Device(type));
+   if (exynos_device->Initialize())
+     return exynos_device.Pass();
+--- /dev/null	1970-01-01 09:00:00.000000000 +0900
++++ /content/common/gpu/media/rcar_v4l2_video_device.cc	2015-08-26 15:45:34.387459238 +0900
+@@ -0,0 +1,223 @@
++// Copyright (C) 2015 Renesas Electronics Corporation
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <fcntl.h>
++#include <linux/videodev2.h>
++#include <poll.h>
++#include <sys/eventfd.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++
++#include "base/posix/eintr_wrapper.h"
++#include "content/common/gpu/media/rcar_v4l2_video_device.h"
++#include "ui/gl/gl_bindings.h"
++#include "libv4l2.h"
++
++#define EGL_NATIVE_PIXFORMAT_ARGB8888_RCAR               2
++
++namespace content {
++
++typedef struct {
++	EGLint  width;
++	EGLint  height;
++	EGLint  stride;
++	EGLint  usage;
++	EGLint  format;
++	void*   pixelData;
++} EGLNativePixmapTypeRCAR;
++
++namespace {
++const char v4l_gst_device[] = "/dev/video-gst";
++}
++
++RCarV4L2Device::RCarV4L2Device(Type type)
++    : device_fd_(-1),
++      device_poll_interrupt_fd_(-1) {}
++
++RCarV4L2Device::~RCarV4L2Device() {
++  if (device_poll_interrupt_fd_ != -1) {
++    close(device_poll_interrupt_fd_);
++    device_poll_interrupt_fd_ = -1;
++  }
++  if (device_fd_ != -1) {
++    v4l2_close(device_fd_);
++    device_fd_ = -1;
++  }
++}
++
++int RCarV4L2Device::Ioctl(int request, void* arg) {
++  return HANDLE_EINTR(v4l2_ioctl(device_fd_, request, arg));
++}
++
++bool RCarV4L2Device::Poll(bool poll_device, bool* event_pending) {
++  struct pollfd pollfds[2];
++  nfds_t nfds;
++  int pollfd = -1;
++
++  pollfds[0].fd = device_poll_interrupt_fd_;
++  pollfds[0].events = POLLIN | POLLERR;
++  nfds = 1;
++
++  if (poll_device) {
++    pollfds[nfds].fd = device_fd_;
++    pollfds[nfds].events = POLLIN | POLLERR;
++    pollfd = nfds;
++    nfds++;
++  }
++
++  if (HANDLE_EINTR(poll(pollfds, nfds, -1)) == -1) {
++    PLOG(ERROR) << "poll failed";
++    return false;
++  }
++  *event_pending = (pollfd != -1 && pollfds[pollfd].revents & POLLPRI);
++
++  return true;
++}
++
++void* RCarV4L2Device::Mmap(void* addr,
++                             unsigned int len,
++                             int prot,
++                             int flags,
++                             unsigned int offset) {
++  return v4l2_mmap(addr, len, prot, flags, device_fd_, offset);
++}
++
++void RCarV4L2Device::Munmap(void* addr, unsigned int len) {
++  munmap(addr, len);
++}
++
++bool RCarV4L2Device::SetDevicePollInterrupt() {
++  const uint64 buf = 1;
++
++  if (HANDLE_EINTR(write(device_poll_interrupt_fd_, &buf, sizeof(buf))) == -1) {
++    PLOG(ERROR) << "write failed";
++    return false;
++  }
++
++  return true;
++}
++
++bool RCarV4L2Device::ClearDevicePollInterrupt() {
++  uint64 buf;
++
++  if (HANDLE_EINTR(read(device_poll_interrupt_fd_, &buf, sizeof(buf))) == -1) {
++    if (errno == EAGAIN)
++      return true;
++
++    PLOG(ERROR) << "read failed";
++    return false;
++  }
++
++  return true;
++}
++
++bool RCarV4L2Device::Initialize() {
++  device_fd_ = HANDLE_EINTR(open(v4l_gst_device, O_NONBLOCK | O_CLOEXEC));
++  if (device_fd_ == -1) {
++    PLOG(ERROR) << "open failed";
++    return false;
++  }
++
++  if (v4l2_fd_open(device_fd_, V4L2_DISABLE_CONVERSION) < 0) {
++    PLOG(ERROR) << "v4l2_fd_open failed";
++    return false;
++  }
++
++  device_poll_interrupt_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
++  if (device_poll_interrupt_fd_ == -1) {
++    PLOG(ERROR) << "eventfd failed";
++    return false;
++  }
++
++  return true;
++}
++
++EGLImageKHR RCarV4L2Device::CreateEGLImage(EGLDisplay egl_display,
++                                             EGLContext egl_context,
++                                             GLuint texture_id,
++                                             gfx::Size frame_buffer_size,
++                                             unsigned int buffer_index,
++                                             size_t planes_count) {
++  EGLNativePixmapTypeRCAR rcar_buf;
++  EGLint attrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
++  GLenum err;
++  struct v4l2_buffer buffer;
++  struct v4l2_plane planes[1];
++  struct v4l2_format format;
++  void *addr;
++
++  memset(&buffer, 0, sizeof(buffer));
++  memset(planes, 0, sizeof(planes));
++
++  buffer.index    = buffer_index;
++  buffer.type     = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
++  buffer.memory   = V4L2_MEMORY_MMAP;
++  buffer.m.planes = planes;
++  buffer.length   = 1;
++  if (Ioctl(VIDIOC_QUERYBUF, &buffer) == -1) {
++    PLOG(ERROR) << "VIDIOC_QUERYBUF CAPTURE failed index=" << buffer_index;
++    return EGL_NO_IMAGE_KHR;
++  }
++
++  memset(&format, 0, sizeof(format));
++  format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
++  if (Ioctl(VIDIOC_G_FMT, &format) != 0) {
++	  PLOG(ERROR) << "VIDIOC_G_FMT CAPTURE failed index=" << buffer_index;
++    return EGL_NO_IMAGE_KHR;
++  }
++
++  addr = Mmap(NULL, buffer.m.planes[0].length,
++              PROT_READ, MAP_SHARED, buffer.m.planes[0].m.mem_offset);
++  if (addr == MAP_FAILED) {
++    PLOG(ERROR) << "Mmap failed index=" << buffer_index;
++    return EGL_NO_IMAGE_KHR;
++  }
++
++  rcar_buf.width = frame_buffer_size.width();
++  rcar_buf.height = frame_buffer_size.height();
++  rcar_buf.format = EGL_NATIVE_PIXFORMAT_ARGB8888_RCAR;
++  rcar_buf.stride = format.fmt.pix_mp.plane_fmt[0].bytesperline / 4;
++  rcar_buf.usage = 0;
++  rcar_buf.pixelData = addr;
++
++  EGLImageKHR egl_image = eglCreateImageKHR(
++      egl_display, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR,
++      (EGLClientBuffer) &rcar_buf, attrs);
++
++  if (egl_image == EGL_NO_IMAGE_KHR) {
++    PLOG(ERROR) << "eglCreateImage failed";
++    return EGL_NO_IMAGE_KHR;
++  }
++
++  glBindTexture(GL_TEXTURE_EXTERNAL_OES, texture_id);
++  err = glGetError();
++  if (err != GL_NO_ERROR)
++    PLOG(ERROR) << "Error on bind " << std::hex << err;
++
++  glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, egl_image);
++  err = glGetError();
++  if (err != GL_NO_ERROR)
++    PLOG(ERROR) << "Error on Image Target " << std::hex << err;
++
++  return egl_image;
++}
++
++EGLBoolean RCarV4L2Device::DestroyEGLImage(EGLDisplay egl_display,
++                                             EGLImageKHR egl_image) {
++  /* TODO: munmap output buffers binding egl_images. */
++  return eglDestroyImageKHR(egl_display, egl_image);
++}
++
++GLenum RCarV4L2Device::GetTextureTarget() { return GL_TEXTURE_EXTERNAL_OES; }
++
++uint32 RCarV4L2Device::PreferredInputFormat() {
++  /* Encoder is not supported. */
++  return 0;
++}
++
++uint32 RCarV4L2Device::PreferredOutputFormat() {
++  return V4L2_PIX_FMT_ABGR32;
++}
++
++}  //  namespace content
+--- /dev/null	1970-01-01 09:00:00.000000000 +0900
++++ /content/common/gpu/media/rcar_v4l2_video_device.h	2015-08-26 15:45:44.047507139 +0900
+@@ -0,0 +1,53 @@
++// Copyright (C) 2015 Renesas Electronics Corporation
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CONTENT_COMMON_GPU_MEDIA_RCAR_V4L2_VIDEO_DEVICE_H_
++#define CONTENT_COMMON_GPU_MEDIA_RCAR_V4L2_VIDEO_DEVICE_H_
++
++#include "content/common/gpu/media/v4l2_video_device.h"
++
++namespace content {
++
++class RCarV4L2Device : public V4L2Device {
++ public:
++  explicit RCarV4L2Device(Type type);
++  virtual ~RCarV4L2Device();
++
++  // V4L2Device implementation.
++  virtual int Ioctl(int request, void* arg) override;
++  virtual bool Poll(bool poll_device, bool* event_pending) override;
++  virtual bool SetDevicePollInterrupt() override;
++  virtual bool ClearDevicePollInterrupt() override;
++  virtual void* Mmap(void* addr,
++                     unsigned int len,
++                     int prot,
++                     int flags,
++                     unsigned int offset) override;
++  virtual void Munmap(void* addr, unsigned int len) override;
++  virtual bool Initialize() override;
++  virtual EGLImageKHR CreateEGLImage(EGLDisplay egl_display,
++                                     EGLContext egl_context,
++                                     GLuint texture_id,
++                                     gfx::Size frame_buffer_size,
++                                     unsigned int buffer_index,
++                                     size_t planes_count) override;
++  virtual EGLBoolean DestroyEGLImage(EGLDisplay egl_display,
++                                     EGLImageKHR egl_image) override;
++  virtual GLenum GetTextureTarget() override;
++  virtual uint32 PreferredInputFormat() override;
++  virtual uint32 PreferredOutputFormat() override;
++
++ private:
++  // The actual device fd.
++  int device_fd_;
++
++  // eventfd fd to signal device poll thread when its poll() should be
++  // interrupted.
++  int device_poll_interrupt_fd_;
++
++  DISALLOW_COPY_AND_ASSIGN(RCarV4L2Device);
++};
++}  //  namespace content
++
++#endif  // CONTENT_COMMON_GPU_MEDIA_RCAR_V4L2_VIDEO_DEVICE_H_
+--- /content/content_common.gypi	2015-08-26 15:24:53.277304905 +0900
++++ /content/content_common.gypi	2015-08-21 14:18:26.000000000 +0900
+@@ -751,7 +751,14 @@
+       'dependencies': [
+         '../media/media.gyp:media',
+       ],
++      'link_settings': {
++        'libraries': [
++          '-lv4l2',
++        ],
++      },
+       'sources': [
++        'common/gpu/media/rcar_v4l2_video_device.cc',
++        'common/gpu/media/rcar_v4l2_video_device.h',
+         'common/gpu/media/exynos_v4l2_video_device.cc',
+         'common/gpu/media/exynos_v4l2_video_device.h',
+         'common/gpu/media/tegra_v4l2_video_device.cc',

@@ -1,0 +1,53 @@
+From bf09dee384fdb697c6741278c53c5396f36688f8 Mon Sep 17 00:00:00 2001
+From: Damian Hobson-Garcia <dhobsong@igel.co.jp>
+Date: Tue, 7 Jul 2015 16:55:15 +0900
+Subject: [PATCH] Enable V4L2VDA on Chromium
+
+This should be updated to enable when using OZONE only, not
+generic Chromium.  Actual patch will be created when target version
+of crosswalk is revealed.
+---
+ src/content/common/gpu/media/gpu_video_decode_accelerator.cc | 6 ++++--
+ src/content/content_common.gypi                              | 2 +-
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git /content/common/gpu/media/gpu_video_decode_accelerator.cc /content/common/gpu/media/gpu_video_decode_accelerator.cc
+index 2f71b82..9d87c2d 100644
+--- /content/common/gpu/media/gpu_video_decode_accelerator.cc
++++ /content/common/gpu/media/gpu_video_decode_accelerator.cc
+@@ -28,7 +28,8 @@
+ #include "content/common/gpu/media/dxva_video_decode_accelerator.h"
+ #elif defined(OS_MACOSX)
+ #include "content/common/gpu/media/vt_video_decode_accelerator.h"
+-#elif defined(OS_CHROMEOS) && defined(ARCH_CPU_ARMEL) && defined(USE_X11)
++//#elif defined(OS_CHROMEOS) && defined(ARCH_CPU_ARMEL) && defined(USE_X11)
++#elif defined(ARCH_CPU_ARMEL) && (defined(USE_X11) || defined(USE_OZONE))
+ #include "content/common/gpu/media/v4l2_video_decode_accelerator.h"
+ #include "content/common/gpu/media/v4l2_video_device.h"
+ #elif defined(OS_CHROMEOS) && defined(ARCH_CPU_X86_FAMILY) && defined(USE_X11)
+@@ -259,7 +260,8 @@ void GpuVideoDecodeAccelerator::Initialize(
+       static_cast<CGLContextObj>(
+           stub_->decoder()->GetGLContext()->GetHandle()),
+       make_context_current_));
+-#elif defined(OS_CHROMEOS) && defined(ARCH_CPU_ARMEL) && defined(USE_X11)
++#elif defined(ARCH_CPU_ARMEL) && (defined(USE_X11) || defined(USE_OZONE))
++//#elif defined(OS_CHROMEOS) && defined(ARCH_CPU_ARMEL) && defined(USE_X11)
+   scoped_ptr<V4L2Device> device = V4L2Device::Create(V4L2Device::kDecoder);
+   if (!device.get()) {
+     SendCreateDecoderReply(init_done_msg, false);
+diff /content/content_common.gypi /content/content_common.gypi
+index dac68f7..566378f 100644
+--- /content/content_common.gypi
++++ /content/content_common.gypi
+@@ -747,7 +747,7 @@
+         '../third_party/libjingle/libjingle.gyp:libjingle',
+       ],
+     }],
+-    ['target_arch=="arm" and chromeos == 1 and use_x11 == 1', {
++    ['target_arch=="arm" and chromeos == 0 and use_x11 == 0', {
+       'dependencies': [
+         '../media/media.gyp:media',
+       ],
+--
+1.9.1
+
